@@ -1,248 +1,127 @@
 `timescale 1ns/1ps
 
 module tb;
-    // Dut singals
-    reg clk_50M;
-    reg reset;
-    wire sensor;
-    wire [7:0] T_integral;
-    wire [7:0] T_decimal;
-    wire [7:0] Checksum;
-    wire [7:0] RH_integral;
-    wire [7:0] RH_decimal;
-    wire data_valid;
 
-    // Expected values
-    reg [7:0] exp_T_integral;
-    reg [7:0] exp_T_decimal;
-    reg [7:0] exp_RH_integral;
-    reg [7:0] exp_RH_decimal;
-    reg [7:0] exp_Checksum;
-    reg exp_data_valid;
+reg clk_3125 = 0, rx;
+wire [7:0] rx_msg;
+reg  [7:0] rx_exp = 0;
+wire rx_parity;
+reg exp_parity = 0;
+wire rx_complete;
+reg  exp_rx_complete = 0;
 
-    // internal signals
-    integer error_count;
-    integer fw;
-    integer j;
+integer err = 0;
+reg [109:0] data = 0;
+reg [7:0] msg = 0;
 
-    // simulate bidirectional signal
-    reg sensor_driver;
-    reg sensor_drive_enable;  // 1 - output, 0 - input
-    assign sensor = sensor_drive_enable ? sensor_driver : 1'bz;
+integer i = 0, j = 0, k = 0,p = 0, fd = 0, fw = 0, s = 0, f = 0;
+integer counter = 0;
+reg [(10*11)-1:0] str; //10 chars can be stored
+reg flag = 0;
 
-    // Instantiate the DUT
-    t2a_dht uut(
-        .clk_50M(clk_50M),
-        .reset(reset),
-        .sensor(sensor),
-        .T_integral(T_integral),
-	    .T_decimal(T_decimal),
-        .RH_integral(RH_integral),
-	    .RH_decimal(RH_decimal),
-	    .Checksum(Checksum),
-        .data_valid(data_valid)
-    );
+uart_rx uut(.clk_3125(clk_3125), .rx(rx), .rx_msg(rx_msg), .rx_parity(rx_parity), .rx_complete(rx_complete));
 
-    // Clock generation: 50MHz
-    always #10 clk_50M = ~clk_50M;
+always begin
+	clk_3125 = ~clk_3125; #160;
+end
 
-    // Task to simulate one bit
-    task send_bit(input reg bit_value);
-        begin
-            // 50us LOW
-            sensor_drive_enable = 1;
-            sensor_driver = 0;
-            repeat(2500) @(posedge clk_50M);
-            // HIGH duration determines bit
-            sensor_driver = 1;
-            if (bit_value)
-                repeat(3500) @(posedge clk_50M); // ~70us
-            else
-                repeat(1300) @(posedge clk_50M); // ~26us
-        end
-    endtask
+initial begin
+	fd = $fopen("data.txt", "r");
+	while(! $feof(fd)) begin
+		$fgets(str, fd);
+		if(str != 0) begin
+			data[i] = str[15:8] - 48;
+		end
+		i = i + 1;
+	end
+	$fclose(fd);
+end
 
-    task send_byte(input [7:0] data);
-        integer i;
-        begin
-            for (i = 7; i >= 0; i = i - 1) begin
-                send_bit(data[i]);      // sending bit by bit
-            end
-        end
-    endtask
+initial begin
+	@(negedge clk_3125);
+	rx_exp = 0;
+	repeat(297) begin @(posedge clk_3125); end
+	for(k = 0; k < 11; k = k+1) begin
+		msg = data[(11*k+1) + : 9];
+		rx_exp = {<<{msg[7:0]}};
+		exp_parity = (^rx_exp)?1'b1:1'b0;
+		repeat(297) begin @(posedge clk_3125); end
+		s = s + 1;
+	end
+end
 
-    // Initialization
-    initial begin
-        exp_RH_integral = 0;
-        exp_RH_decimal = 0;
-        exp_T_integral = 0;
-        exp_T_decimal = 0;
-        exp_Checksum = 0;
-        exp_data_valid = 1'b0;
-
-        clk_50M = 0;
-        reset = 0;
-        sensor_driver = 1;
-        sensor_drive_enable = 0;
-        error_count = 0;
-        fw = 0; j = 0;
+initial begin
+	fd = $fopen("data.txt", "r");
+	while(! $feof(fd)) begin
+    if($fgets(str, fd)) begin
+        if(str != 0) begin
+            rx = str[15:8] - 48;
     end
+		repeat(27) begin @(posedge clk_3125); end
+        end
+        rx = 1'b0;
+	end
+	$fclose(fd);
+end
 
-    initial begin
-        repeat(5) @(posedge clk_50M);
-        reset = 1; j = 0;
-        repeat(5) @(posedge clk_50M);
-        // Master pulls down sensor for 18ms
-        sensor_drive_enable = 1;
-        sensor_driver = 0;
-        repeat(900000) @(posedge clk_50M);
-        // Master pulls up for 40us
-        sensor_driver = 1;
-        repeat(2000) @(posedge clk_50M);
-        // Release line: sensor will respond
-        sensor_drive_enable = 0;
-        // Sensor pulls down for 80us
-        sensor_drive_enable = 1;
-        sensor_driver = 0;
-        repeat(4000) @(posedge clk_50M);
-        // Sensor pulls up for 80us
-        sensor_driver = 1;
-        repeat(4000) @(posedge clk_50M);
-        // Send 5 bytes: RH, RH dec, Temp, Temp dec, Checksum
-        send_byte(8'd55); // RH integer
-        j = j + 1;
-        send_byte(8'd15);  // RH decimal
-        j = j + 1;
-        send_byte(8'd23); // Temp integer
-        j = j + 1;
-        send_byte(8'd05);  // Temp decimal
-        j = j + 1;
-        send_byte(8'd98); // Checksum = RH int + RH dec + Temp int + Temp dec
-        j = j + 1;
-        // Release line
-        sensor_drive_enable = 0;
-        // Wait for DUT to process
-        repeat(4) @(posedge clk_50M);
-        exp_RH_integral = 8'd55;
-        exp_RH_decimal = 8'd15;
-        exp_T_integral = 8'd23;
-        exp_T_decimal = 8'd05;
-        exp_Checksum = exp_RH_integral + exp_RH_decimal + exp_T_integral + exp_T_decimal;
-        // data valid for 1 clock cycle
-        exp_data_valid = 1'b1;
-        @(posedge clk_50M);
-        exp_data_valid = 1'b0;
-        // some delay before next packet
-        repeat(5) @(posedge clk_50M);
-        // Master pulls down sensor for 18ms
-        sensor_drive_enable = 1;
-        sensor_driver = 0;
-        repeat(900000) @(posedge clk_50M);
-        // Master pulls up for 40us
-        sensor_driver = 1;
-        repeat(2000) @(posedge clk_50M);
-        // Release line: sensor will respond
-        sensor_drive_enable = 0;
-        // Sensor pulls down for 80us
-        sensor_drive_enable = 1;
-        sensor_driver = 0;
-        repeat(4000) @(posedge clk_50M);
-        // Sensor pulls up for 80us
-        sensor_driver = 1;
-        repeat(4000) @(posedge clk_50M);
-        // Send 5 bytes: RH, RH dec, Temp, Temp dec, Checksum
-        send_byte(8'd30); // RH integer
-        j = j + 1;
-        send_byte(8'd5);  // RH decimal
-        j = j + 1;
-        send_byte(8'd29); // Temp integer
-        j = j + 1;
-        send_byte(8'd01);  // Temp decimal
-        j = j + 1;
-        send_byte(8'd65); // Checksum = RH int + RH dec + Temp int + Temp dec
-        j = j + 1;
-        // Release line
-        sensor_drive_enable = 0;
-        // Wait for DUT to process
-        repeat(4) @(posedge clk_50M);
-        exp_RH_integral = 8'd30;
-        exp_RH_decimal = 8'd5;
-        exp_T_integral = 8'd29;
-        exp_T_decimal = 8'd01;
-        exp_Checksum = exp_RH_integral + exp_RH_decimal + exp_T_integral + exp_T_decimal;
-        // data valid for 1 clock cycle
-        exp_data_valid = 1'b1;
-        @(posedge clk_50M);
-        exp_data_valid = 1'b0;
-        // some delay before next packet
-        repeat(5) @(posedge clk_50M);
-        // Master pulls down sensor for 18ms
-        sensor_drive_enable = 1;
-        sensor_driver = 0;
-        repeat(900000) @(posedge clk_50M);
-        // Master pulls up for 40us
-        sensor_driver = 1;
-        repeat(2000) @(posedge clk_50M);
-        // Release line: sensor will respond
-        sensor_drive_enable = 0;
-        // Sensor pulls down for 80us
-        sensor_drive_enable = 1;
-        sensor_driver = 0;
-        repeat(4000) @(posedge clk_50M);
-        // Sensor pulls up for 80us
-        sensor_driver = 1;
-        repeat(4000) @(posedge clk_50M);
-        // Send 5 bytes: RH, RH dec, Temp, Temp dec, Checksum
-        send_byte(8'd95); // RH integer
-        j = j + 1;
-        send_byte(8'd2);  // RH decimal
-        j = j + 1;
-        send_byte(8'd78); // Temp integer
-        j = j + 1;
-        send_byte(8'd30);  // Temp decimal
-        j = j + 1;
-        send_byte(8'd205); // Checksum = RH int + RH dec + Temp int + Temp dec
-        j = j + 1;
-        // Release line
-        sensor_drive_enable = 0;
-        // Wait for DUT to process
-        repeat(4) @(posedge clk_50M);
-        exp_RH_integral = 8'd95;
-        exp_RH_decimal = 8'd2;
-        exp_T_integral = 8'd78;
-        exp_T_decimal = 8'd30;
-        exp_Checksum = exp_RH_integral + exp_RH_decimal + exp_T_integral + exp_T_decimal;
-        // data valid for 1 clock cycle
-        exp_data_valid = 1'b1;
-        @(posedge clk_50M);
-        exp_data_valid = 1'b0;
-        // some delay before finishing
-        repeat(5) @(posedge clk_50M);
-    end
+always @(posedge clk_3125) begin
+	exp_rx_complete = 1'b0;
+	if(s >= (i-1)/10) begin
+		exp_rx_complete = 1'b0;
+	end else begin
+		if(counter == 297) begin
+			exp_rx_complete = 1'b1;
+			counter = 0;
+		end
+		counter = counter + 1;
+	end
+end
 
-    always @(posedge clk_50M) begin
-        #1;
-        if(RH_integral !== exp_RH_integral) error_count = error_count + 1;
-        if(RH_decimal !== exp_RH_decimal) error_count = error_count + 1;
-        if(T_integral !== exp_T_integral) error_count = error_count + 1;
-        if(T_decimal !== exp_T_decimal) error_count = error_count + 1;
-        if(Checksum !== exp_Checksum) error_count = error_count + 1;
-        if(data_valid !== exp_data_valid) error_count = error_count + 1;
-          
-        if( j >= 14) begin
-            if(error_count !== 0) begin
-            fw = $fopen("result.txt", "w");
+always @(negedge exp_rx_complete) begin
+  if(p <= 9) begin
+    p <= p + 1;
+		if(p > 0) begin
+			if((rx_parity !== exp_parity)) begin
+				  $display("rx_msg: %c,exp_msg:%c,rx_parity:%b,exp_parity:%b",rx_msg,8'h3F,rx_parity,exp_parity);
+	 		 end else begin
+				  $display("rx_msg: %c,exp_msg:%c,rx_parity:%b,exp_parity:%b",rx_msg,rx_exp,rx_parity,exp_parity);
+	 		 end
+  		end
+	end else p <= 0;
+end
+
+always @(clk_3125) begin
+	if(p >= 10) begin
+		flag = 1;
+	end else begin
+		flag = 0;
+	end
+end
+
+always @(negedge clk_3125) begin
+	#1;
+	if ((rx_parity === exp_parity) && (rx_msg !== rx_exp)) err = err + 1;
+	if ((rx_parity !== exp_parity) && (rx_msg !== 'h3F)) err = err + 1;
+	if (rx_complete !== exp_rx_complete) err = err + 1'b1;
+end
+
+always @(negedge clk_3125) begin
+    if (p == (((i-1)/10)) || (flag == 1)) begin
+        if (err !== 0) begin
+            fw = $fopen("results.txt","w");
             $fdisplay(fw, "%02h","Errors");
-            $display("Error(s) encountered, please check your design!");
+            repeat (300) begin @(posedge clk_3125); end
+			$display("Error(s) encountered, please check your design!");
             $fclose(fw);
-        end else begin
-            fw = $fopen("result.txt", "w");
+        end
+        else begin
+            fw = $fopen("results.txt","w");
             $fdisplay(fw, "%02h","No Errors");
+            repeat (300) begin @(posedge clk_3125); end
             $display("No errors encountered, congratulations!");
             $fclose(fw);
         end
-        j = 0;
-        end
     end
+end
 
 endmodule
